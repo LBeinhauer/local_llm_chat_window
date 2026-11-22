@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Chat</title>
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f6f5f2; --text: #1f1e1d; --muted: #85827c;
+    --border: #e5e2dc; --accent: #c96442; --user: #eeebe4; --code: #f0eee8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #262624; --panel: #1f1e1d; --text: #ece9e2; --muted: #9a968e;
+      --border: #3a3936; --accent: #d97757; --user: #34332f; --code: #1a1918;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); display: flex;
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+
+  /* ---------- Sidebar ---------- */
+  #sidebar {
+    width: 290px; flex: none; background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  #sidebar .top { padding: 14px 12px 8px; display: flex; flex-direction: column; gap: 8px; }
+  #newChat {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 9px 12px; cursor: pointer; font-weight: 600;
+  }
+  #newChat:hover { filter: brightness(1.08); }
+  #search {
+    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); outline: none;
+  }
+  #search:focus { border-color: var(--accent); }
+  #chatList { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
+  .group-label { font-size: 12px; color: var(--muted); padding: 12px 8px 4px; text-transform: uppercase; letter-spacing: .04em; }
+  .chat-item {
+    display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  }
+  .chat-item:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
+  .chat-item.active { background: color-mix(in srgb, var(--text) 12%, transparent); }
+  .ci-main { flex: 1; min-width: 0; }
+  .ci-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ci-snip { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ci-snip mark, .ci-title mark { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 2px; }
+  .ci-del {
+    visibility: hidden; border: 0; background: transparent; color: var(--muted);
+    cursor: pointer; font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: 6px;
+  }
+  .chat-item:hover .ci-del { visibility: visible; }
+  .ci-del:hover { color: #d33; background: color-mix(in srgb, #d33 15%, transparent); }
+  .empty-list { color: var(--muted); padding: 16px 10px; font-size: 14px; }
+
+  /* ---------- Main ---------- */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  header {
+    display: flex; align-items: center; gap: 10px; padding: 10px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  #title {
+    flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; cursor: text;
+  }
+  #title:hover { text-decoration: underline dotted; }
+  select, .btn {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; cursor: pointer;
+  }
+  select { max-width: 260px; }
+  .btn:hover, select:hover { border-color: var(--muted); }
+  #sysWrap { display: none; padding: 10px 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  #sysWrap.open { display: block; }
+  #sysWrap label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+  #sysPrompt {
+    width: 100%; min-height: 60px; resize: vertical; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg);
+  }
+  #banner {
+    display: none; background: color-mix(in srgb, #d33 14%, var(--bg)); color: var(--text);
+    padding: 8px 18px; font-size: 14px; border-bottom: 1px solid var(--border);
+  }
+  #banner.show { display: block; }
+
+  #messages { flex: 1; overflow-y: auto; padding: 24px 18px 8px; scroll-behavior: auto; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .msg { margin: 0 0 22px; }
+  .msg.user { display: flex; justify-content: flex-end; }
+  .msg.user .bubble {
+    background: var(--user); padding: 9px 14px; border-radius: 14px; max-width: 85%;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .msg.assistant .who { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .msg.assistant .body { word-wrap: break-word; overflow-wrap: anywhere; }
+  .body > :first-child { margin-top: 0; }
+  .body > :last-child { margin-bottom: 0; }
+  .body p, .body ul, .body ol, .body pre, .body blockquote, .body table { margin: 0 0 12px; }
+  .body pre {
+    position: relative; background: var(--code); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; overflow-x: auto; font-size: 13.5px; line-height: 1.5;
+  }
+  .body code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
+  .body :not(pre) > code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  .body blockquote { border-left: 3px solid var(--border); padding-left: 12px; color: var(--muted); }
+  .body table { border-collapse: collapse; }
+  .body th, .body td { border: 1px solid var(--border); padding: 4px 10px; }
+  .copy {
+    position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 2px 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg); border-radius: 6px; color: var(--muted);
+  }
+  .err { color: #d33; margin-top: 6px; font-size: 14px; }
+  .dots::after { content: "…"; animation: blink 1s infinite; color: var(--muted); }
+  @keyframes blink { 50% { opacity: .2; } }
+  .hero { text-align: center; margin-top: 18vh; color: var(--muted); }
+  .hero h1 { color: var(--text); font-weight: 500; font-size: 28px; margin: 0 0 8px; }
+
+  /* ---------- Composer ---------- */
+  #composer { padding: 10px 18px 18px; }
+  .box {
+    max-width: 760px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end;
+    border: 1px solid var(--border); border-radius: 14px; padding: 8px 8px 8px 14px; background: var(--bg);
+  }
+  .box:focus-within { border-color: var(--accent); }
+  #input {
+    flex: 1; border: 0; outline: none; resize: none; background: transparent;
+    max-height: 220px; padding: 6px 0; line-height: 1.5;
+  }
+  #send {
+    border: 0; background: var(--accent); color: #fff; border-radius: 10px;
+    padding: 8px 14px; cursor: pointer; font-weight: 600;
+  }
+  #send.stop { background: #555; }
+  #send:disabled { opacity: .4; cursor: default; }
+  .hint { text-align: center; font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  @media (max-width: 720px) { #sidebar { display: none; } }
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <div class="top">
+    <button id="newChat">+ New chat</button>
+    <input id="search" type="search" placeholder="Search chats…" autocomplete="off">
+  </div>
+  <div id="chatList"></div>
+</aside>
+
+<section id="main">
+  <header>
+    <div id="title" title="Click to rename">New chat</div>
+    <button class="btn" id="sysToggle" title="Set a system prompt for this chat">System prompt</button>
+    <select id="modelSel" title="Model for the next message"></select>
+  </header>
+  <div id="sysWrap">
+    <label for="sysPrompt">System prompt (applies to this chat)</label>
+    <textarea id="sysPrompt" placeholder="e.g. You are a concise assistant that answers in German."></textarea>
+  </div>
+  <div id="banner"></div>
+  <div id="messages"><div class="wrap" id="msgWrap"></div></div>
+  <div id="composer">
+    <div class="box">
+      <textarea id="input" rows="1" placeholder="Message your local model…"></textarea>
+      <button id="send">Send</button>
+    </div>
+    <div class="hint">Enter to send · Shift+Enter for a new line</div>
+  </div>
+</section>
+
+<!-- Markdown rendering. If you're offline these fail to load and replies show as plain text. -->
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const state = {
+  chats: [],          // sidebar list
+  chat: null,         // {id|null, title, model, system_prompt, messages[]}
+  models: [],
+  busy: false,
+  ctrl: null,
+  query: '',
+};
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).error || msg; } catch {}
+    throw new Error(msg);
+  }
+  return r.status === 204 ? null : r.json();
+}
+
+function showBanner(msg) {
+  const b = $('#banner');
+  b.textContent = msg || '';
+  b.classList.toggle('show', !!msg);
+}
+
+/* ---------------- Markdown ---------------- */
+function renderMd(text) {
+  if (window.marked && window.DOMPurify) {
+    return DOMPurify.sanitize(marked.parse(text, { breaks: true }));
+  }
+  return '<p style="white-space:pre-wrap">' + esc(text) + '</p>';
+}
+function addCopyButtons(root) {
+  root.querySelectorAll('pre').forEach(pre => {
+    if (pre.querySelector('.copy')) return;
+    const b = document.createElement('button');
+    b.className = 'copy'; b.textContent = 'Copy';
+    b.onclick = async () => {
+      await navigator.clipboard.writeText(pre.innerText.replace(/Copy$/, '').trimEnd());
+      b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1200);
+    };
+    pre.appendChild(b);
+  });
+}
+
+/* ---------------- Messages ---------------- */
+function buildMessage(m) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + m.role;
+  if (m.role === 'user') {
+    el.innerHTML = '<div class="bubble"></div>';
+    $('.bubble', el).textContent = m.content;
+  } else {
+    el.innerHTML = '<div class="who"></div><div class="body"></div><div class="err"></div>';
+    $('.who', el).textContent = m.model || '';
+    fillAssistant(el, m);
+  }
+  return el;
+}
+function fillAssistant(el, m) {
+  const body = $('.body', el);
+  if (m.content) { body.classList.remove('dots'); body.innerHTML = renderMd(m.content); addCopyButtons(body); }
+  else if (state.busy && !m.error) { body.innerHTML = ''; body.classList.add('dots'); }
+  else { body.innerHTML = ''; body.classList.remove('dots'); }
+  $('.err', el).textContent = m.error || '';
+}
+
+function nearBottom() {
+  const s = $('#messages');
+  return s.scrollHeight - s.scrollTop - s.clientHeight < 120;
+}
+function scrollBottom() { const s = $('#messages'); s.scrollTop = s.scrollHeight; }
+
+function renderMessages() {
+  const wrap = $('#msgWrap');
+  wrap.innerHTML = '';
+  const chat = state.chat;
+  if (!chat.messages.length) {
+    wrap.innerHTML = `<div class="hero"><h1>What's on your mind?</h1><div>Chatting with ${esc($('#modelSel').value || 'a local model')}</div></div>`;
+    return;
+  }
+  for (const m of chat.messages) wrap.appendChild(buildMessage(m));
+  scrollBottom();
+}
+
+function renderHeader() {
+  $('#title').textContent = state.chat.title || 'New chat';
+  $('#sysPrompt').value = state.chat.system_prompt || '';
+  syncModelSelect();
+}
+
+function syncModelSelect() {
+  const sel = $('#modelSel');
+  const want = state.chat.model || localStorage.getItem('lastModel') || state.models[0] || '';
+  const names = [...state.models];
+  if (want && !names.includes(want)) names.push(want);
+  sel.innerHTML = names.map(n => `<option value="${esc(n)}">${esc(n)}${state.models.includes(n) ? '' : ' (not installed)'}</option>`).join('');
+  if (want) sel.value = want;
+}
+
+/* ---------------- Sidebar ---------------- */
+function groupLabel(ts) {
+  const d = new Date(ts * 1000), now = new Date();
+  const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(now) - day(d)) / 86400000);
+  if (diff <= 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  if (diff < 7) return 'Previous 7 days';
+  if (diff < 30) return 'Previous 30 days';
+  return 'Older';
+}
+function highlight(text, q) {
+  const safe = esc(text);
+  if (!q) return safe;
+  return safe.replace(new RegExp(escRe(esc(q)), 'gi'), m => `<mark>${m}</mark>`);
+}
+
+function renderSidebar() {
+  const list = $('#chatList');
+  list.innerHTML = '';
+  if (!state.chats.length) {
+    list.innerHTML = `<div class="empty-list">${state.query ? 'No chats match your search.' : 'No chats yet.'}</div>`;
+    return;
+  }
+  let last = null;
+  for (const c of state.chats) {
+    if (!state.query) {
+      const g = groupLabel(c.updated_at);
+      if (g !== last) { list.insertAdjacentHTML('beforeend', `<div class="group-label">${g}</div>`); last = g; }
+    }
+    const el = document.createElement('div');
+    el.className = 'chat-item' + (state.chat && state.chat.id === c.id ? ' active' : '');
+    el.innerHTML = `<div class="ci-main"><div class="ci-title">${highlight(c.title, state.query)}</div>` +
+      (c.snippet ? `<div class="ci-snip">${highlight(c.snippet.replace(/\s+/g, ' '), state.query)}</div>` : '') +
+      `</div><button class="ci-del" title="Delete chat">×</button>`;
+    el.onclick = () => openChat(c.id);
+    $('.ci-del', el).onclick = async e => { e.stopPropagation(); await deleteChat(c); };
+    list.appendChild(el);
+  }
+}
+
+async function loadChats() {
+  try {
+    const q = state.query ? '?q=' + encodeURIComponent(state.query) : '';
+    state.chats = (await api('/api/chats' + q)).chats;
+    if (state.chat && state.chat.id) {
+      const hit = state.chats.find(c => c.id === state.chat.id);
+      if (hit && hit.title !== state.chat.title) { state.chat.title = hit.title; $('#title').textContent = hit.title; }
+    }
+    renderSidebar();
+  } catch (e) { showBanner(e.message); }
+}
+
+/* ---------------- Chat actions ---------------- */
+function stopStream() { if (state.ctrl) state.ctrl.abort(); }
+
+function newChat() {
+  stopStream();
+  state.chat = { id: null, title: 'New chat', model: null, system_prompt: '', messages: [] };
+  renderHeader(); renderMessages(); renderSidebar();
+  $('#input').focus();
+}
+
+async function openChat(id) {
+  if (state.chat && state.chat.id === id) return;
+  stopStream();
+  try {
+    state.chat = await api('/api/chats/' + id);
+    renderHeader(); renderMessages(); renderSidebar();
+  } catch (e) { showBanner(e.message); }
+}
+
+async function deleteChat(c) {
+  if (!confirm(`Delete "${c.title}"? This can't be undone.`)) return;
+  await api('/api/chats/' + c.id, { method: 'DELETE' });
+  if (state.chat && state.chat.id === c.id) newChat();
+  await loadChats();
+}
+
+async function renameChat() {
+  if (!state.chat.id) return;
+  const t = prompt('Rename chat', state.chat.title);
+  if (!t || !t.trim()) return;
+  await api('/api/chats/' + state.chat.id, { method: 'PATCH', body: JSON.stringify({ title: t }) });
+  state.chat.title = t.trim();
+  $('#title').textContent = state.chat.title;
+  await loadChats();
+}
+
+function setBusy(b) {
+  state.busy = b;
+  const btn = $('#send');
+  btn.textContent = b ? 'Stop' : 'Send';
+  btn.classList.toggle('stop', b);
+}
+
+async function send() {
+  if (state.busy) { stopStream(); return; }
+  const input = $('#input');
+  const text = input.value.trim();
+  if (!text) return;
+  const model = $('#modelSel').value;
+  if (!model) { showBanner('No model available. Is Ollama running and do you have a model pulled?'); return; }
+  showBanner('');
+
+  const chat = state.chat;
+  try {
+    if (!chat.id) {
+      const created = await api('/api/chats', {
+        method: 'POST', body: JSON.stringify({ model, system_prompt: $('#sysPrompt').value }),
+      });
+      chat.id = created.id; chat.title = created.title;
+    }
+  } catch (e) { showBanner(e.message); return; }
+
+  chat.model = model;
+  localStorage.setItem('lastModel', model);
+  chat.messages.push({ role: 'user', content: text });
+  const reply = { role: 'assistant', content: '', model };
+  chat.messages.push(reply);
+  input.value = ''; autoGrow();
+  setBusy(true);
+  renderMessages();
+  const replyEl = $('#msgWrap').lastElementChild;
+
+  state.ctrl = new AbortController();
+  let pending = false;
+  const paint = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      if (state.chat !== chat) return;
+      const stick = nearBottom();
+      fillAssistant(replyEl, reply);
+      if (stick) scrollBottom();
+    });
+  };
+
+  try {
+    const resp = await fetch(`/api/chats/${chat.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text, model }), signal: state.ctrl.signal,
+    });
+    if (!resp.ok) {
+      let msg = resp.statusText;
+      try { msg = (await resp.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (!line) continue;
+        const obj = JSON.parse(line);
+        if (obj.t) reply.content += obj.t;
+        if (obj.error) reply.error = obj.error;
+        paint();
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') reply.error = e.message;
+  } finally {
+    setBusy(false);
+    state.ctrl = null;
+    if (state.chat === chat) {
+      if (!reply.content && !reply.error) chat.messages.pop();  // stopped before any output
+      renderMessages();
+    }
+    await loadChats();
+  }
+}
+
+/* ---------------- Wiring ---------------- */
+function autoGrow() {
+  const t = $('#input');
+  t.style.height = 'auto';
+  t.style.height = Math.min(t.scrollHeight, 220) + 'px';
+}
+
+$('#newChat').onclick = newChat;
+$('#send').onclick = send;
+$('#title').onclick = renameChat;
+$('#input').addEventListener('input', autoGrow);
+$('#input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+});
+$('#sysToggle').onclick = () => $('#sysWrap').classList.toggle('open');
+$('#sysPrompt').addEventListener('change', async () => {
+  state.chat.system_prompt = $('#sysPrompt').value;
+  if (state.chat.id) await api('/api/chats/' + state.chat.id, { method: 'PATCH', body: JSON.stringify({ system_prompt: state.chat.system_prompt }) });
+});
+$('#modelSel').addEventListener('change', async () => {
+  state.chat.model = $('#modelSel').value;
+  localStorage.setItem('lastModel', state.chat.model);
+  if (state.chat.id) await api('/api/chats/' + state.chat.id, { method: 'PATCH', body: JSON.stringify({ model: state.chat.model }) });
+  if (!state.chat.messages.length) renderMessages();
+});
+let searchTimer;
+$('#search').addEventListener('input', e => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { state.query = e.target.value.trim(); loadChats(); }, 200);
+});
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus(); }
+});
+
+(async function init() {
+  try { state.models = (await api('/api/models')).models; }
+  catch (e) { showBanner(e.message); }
+  if (!state.models.length && !$('#banner').classList.contains('show')) {
+    showBanner('Ollama is running but has no models. Pull one first, e.g. "ollama pull llama3.2".');
+  }
+  newChat();
+  await loadChats();
+})();
+</script>
+</body>
+</html>
