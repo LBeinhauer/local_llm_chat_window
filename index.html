@@ -6,13 +6,13 @@
 <title>Local Chat</title>
 <style>
   :root {
-    --bg: #ffffff; --panel: #f6f5f2; --text: #1f1e1d; --muted: #85827c;
-    --border: #e5e2dc; --accent: #c96442; --user: #eeebe4; --code: #f0eee8;
+    --bg: #ffffff; --panel: #f3f5f9; --text: #1b2130; --muted: #6b7385;
+    --border: #dfe3ec; --accent: #1e3a8a; --user: #e8edf7; --code: #eef1f7;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #262624; --panel: #1f1e1d; --text: #ece9e2; --muted: #9a968e;
-      --border: #3a3936; --accent: #d97757; --user: #34332f; --code: #1a1918;
+      --bg: #151a26; --panel: #101420; --text: #e6e9f2; --muted: #8e97ab;
+      --border: #283048; --accent: #3b64c4; --user: #1f2740; --code: #0d111b;
     }
   }
   * { box-sizing: border-box; }
@@ -139,6 +139,58 @@
   #send:disabled { opacity: .4; cursor: default; }
   .hint { text-align: center; font-size: 12px; color: var(--muted); margin-top: 6px; }
 
+  /* ---------- Model manager ---------- */
+  .side-foot { padding: 10px 12px; border-top: 1px solid var(--border); }
+  .side-foot .btn { width: 100%; }
+  .btn.primary { background: var(--accent); color: #fff; border-color: transparent; font-weight: 600; }
+  .btn.primary:hover { filter: brightness(1.1); border-color: transparent; }
+  .btn.sm { padding: 3px 10px; font-size: 13px; }
+  .btn.danger:hover { color: #d33; border-color: #d33; }
+  dialog {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 14px;
+    padding: 0; width: min(760px, 94vw); max-height: 86vh;
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, .5); }
+  .dlg-in { padding: 18px 20px 20px; max-height: 86vh; overflow-y: auto; }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .dlg-head strong { font-size: 17px; }
+  .pull { display: flex; gap: 8px; }
+  #pullName {
+    flex: 1; min-width: 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); outline: none;
+  }
+  #pullName:focus { border-color: var(--accent); }
+  #pullStatus { margin-top: 10px; }
+  .pbar { height: 8px; border-radius: 99px; background: var(--user); overflow: hidden; }
+  #pbarFill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  #pullText { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  #pullText.bad { color: #d33; }
+  #modelTable { margin-top: 16px; }
+  #modelTable table { width: 100%; border-collapse: collapse; }
+  #modelTable th, #modelTable td { padding: 9px 6px; border-bottom: 1px solid var(--border); text-align: left; font-size: 14px; }
+  #modelTable th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  #modelTable td.act { text-align: right; white-space: nowrap; }
+  #modelTable td.act .btn { margin-left: 6px; }
+  .mname { font-weight: 600; word-break: break-all; }
+  .badge {
+    font-size: 11px; padding: 1px 8px; border-radius: 99px; margin-left: 8px; font-weight: 500;
+    background: color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+  .dlg-note { margin-top: 14px; font-size: 12px; color: var(--muted); }
+  .browse { display: flex; gap: 8px; margin-bottom: 10px; }
+  .browse select { flex: 1; min-width: 0; max-width: none; }
+  .browse select:disabled { opacity: .6; cursor: default; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .filters select { max-width: none; }
+  #libSearch {
+    flex: 1 1 150px; min-width: 0; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); outline: none;
+  }
+  #libSearch:focus { border-color: var(--accent); }
+  .filters :disabled { opacity: .6; cursor: default; }
+  #libNote { margin: -4px 0 10px; }
+  #libNote:empty { display: none; }
+
   @media (max-width: 720px) { #sidebar { display: none; } }
 </style>
 </head>
@@ -150,6 +202,7 @@
     <input id="search" type="search" placeholder="Search chats…" autocomplete="off">
   </div>
   <div id="chatList"></div>
+  <div class="side-foot"><button class="btn" id="modelsBtn">Manage models</button></div>
 </aside>
 
 <section id="main">
@@ -173,6 +226,39 @@
   </div>
 </section>
 
+<dialog id="modelsDlg">
+  <div class="dlg-in">
+    <div class="dlg-head"><strong>Models</strong><button class="btn sm" id="dlgClose">Close</button></div>
+    <div class="filters">
+      <input id="libSearch" type="search" placeholder="Filter by name..." autocomplete="off" disabled>
+      <select id="libCap" disabled title="Only models with this capability"><option value="">Any capability</option></select>
+      <select id="libSize" disabled title="Only models that have a variant up to this many parameters (billions)">
+        <option value="">Any size</option><option value="2">up to 2B</option><option value="4">up to 4B</option>
+        <option value="8">up to 8B</option><option value="14">up to 14B</option><option value="32">up to 32B</option>
+      </select>
+      <select id="libSort" disabled title="Sort order">
+        <option value="popular">Most popular</option><option value="az">A - Z</option>
+        <option value="small">Smallest variant first</option><option value="large">Largest variant first</option>
+      </select>
+    </div>
+    <div class="browse">
+      <select id="libModel" disabled title="Models available on ollama.com (parameter counts shown)"><option value="">Loading model library...</option></select>
+      <select id="libTag" disabled title="Variants of the chosen model, with download size"><option value="">Variant</option></select>
+    </div>
+    <div class="dlg-note" id="libNote"></div>
+    <div class="pull">
+      <input id="pullName" placeholder="Download a model, e.g. llama3.2 or qwen2.5:7b" autocomplete="off" spellcheck="false">
+      <button class="btn primary" id="pullBtn">Download</button>
+    </div>
+    <div id="pullStatus" hidden>
+      <div class="pbar"><div id="pbarFill"></div></div>
+      <div id="pullText"></div>
+    </div>
+    <div id="modelTable"></div>
+    <div class="dlg-note">The list of downloadable models comes from ollama.com (needs internet); sizes are download sizes. You can always type a name by hand. A cancelled download resumes where it stopped.</div>
+  </div>
+</dialog>
+
 <!-- Markdown rendering. If you're offline these fail to load and replies show as plain text. -->
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
@@ -195,7 +281,8 @@ async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
   if (!r.ok) {
     let msg = r.statusText;
-    try { msg = (await r.json()).error || msg; } catch {}
+    try { msg = (await r.json()).error || msg; }
+    catch { if (r.status === 404) msg = 'The server does not know this feature yet: put the newest app.py in the project folder and restart the tool (close the console window, start it again).'; }
     throw new Error(msg);
   }
   return r.status === 204 ? null : r.json();
@@ -388,6 +475,7 @@ async function send() {
   showBanner('');
 
   const chat = state.chat;
+  const isFirst = chat.messages.length === 0;
   try {
     if (!chat.id) {
       const created = await api('/api/chats', {
@@ -458,7 +546,16 @@ async function send() {
       renderMessages();
     }
     await loadChats();
+    if (isFirst && reply.content) autoTitle(chat.id);  // not awaited: you can keep chatting
   }
+}
+
+// Ask the backend to have the model write a short title (see /title in app.py).
+async function autoTitle(id) {
+  try {
+    await api('/api/chats/' + id + '/title', { method: 'POST' });
+    await loadChats();  // refreshes the sidebar and the header title
+  } catch (e) { /* keep the fallback title (first words of your message) */ }
 }
 
 /* ---------------- Wiring ---------------- */
@@ -493,6 +590,210 @@ $('#search').addEventListener('input', e => {
 });
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus(); }
+});
+
+
+/* ---------------- Model manager ---------------- */
+const fmtSize = b => !b ? '-' : b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.round(b / 1e6) + ' MB';
+const modelsDlg = $('#modelsDlg');
+
+async function refreshModels() {
+  try {
+    state.models = (await api('/api/models')).models;
+    syncModelSelect();
+    if (state.models.length) showBanner('');
+  } catch (e) { showBanner(e.message); }
+}
+
+async function renderModelTable() {
+  const box = $('#modelTable');
+  try {
+    const { models } = await api('/api/models/details');
+    if (!models.length) { box.innerHTML = '<div class="empty-list">No models downloaded yet.</div>'; return; }
+    box.innerHTML = '<table><thead><tr><th>Model</th><th>Size</th><th>Parameters</th><th>Quant.</th><th></th></tr></thead><tbody>' +
+      models.map(m => {
+        const n = esc(m.name);
+        return `<tr><td><span class="mname">${n}</span>${m.loaded ? '<span class="badge">in memory</span>' : ''}</td>` +
+          `<td>${fmtSize(m.size)}</td><td>${esc(m.parameter_size || '-')}</td><td>${esc(m.quantization || '-')}</td>` +
+          `<td class="act">${m.loaded ? `<button class="btn sm" data-act="unload" data-name="${n}">Unload</button>` : ''}` +
+          `<button class="btn sm danger" data-act="delete" data-name="${n}">Delete</button></td></tr>`;
+      }).join('') + '</tbody></table>';
+  } catch (e) { box.innerHTML = '<div class="empty-list">' + esc(e.message) + '</div>'; }
+}
+
+$('#modelTable').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-act]');
+  if (!b) return;
+  const name = b.dataset.name;
+  try {
+    if (b.dataset.act === 'delete') {
+      if (!confirm('Delete "' + name + '" from disk?\nYou would have to download it again.')) return;
+      await api('/api/models', { method: 'DELETE', body: JSON.stringify({ name }) });
+      await refreshModels();
+    } else {
+      await api('/api/models/unload', { method: 'POST', body: JSON.stringify({ name }) });
+    }
+  } catch (err) { alert(err.message); }
+  renderModelTable();
+});
+
+let pullCtrl = null;
+async function pullModel() {
+  if (pullCtrl) { pullCtrl.abort(); return; }   // button doubles as Cancel
+  const name = $('#pullName').value.trim();
+  if (!name) return;
+  const btn = $('#pullBtn'), text = $('#pullText'), fill = $('#pbarFill');
+  pullCtrl = new AbortController();
+  btn.textContent = 'Cancel';
+  $('#pullStatus').hidden = false;
+  text.className = ''; text.textContent = 'Starting...'; fill.style.width = '0';
+  let ok = false;
+  try {
+    const resp = await fetch('/api/models/pull', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }), signal: pullCtrl.signal,
+    });
+    if (!resp.ok) { let m = resp.statusText; try { m = (await resp.json()).error || m; } catch {} throw new Error(m); }
+    const reader = resp.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (!line) continue;
+        const o = JSON.parse(line);
+        if (o.error) throw new Error(o.error);
+        if (o.total && o.completed != null) {
+          const pct = Math.min(100, Math.round(o.completed / o.total * 100));
+          fill.style.width = pct + '%';
+          text.textContent = o.status + ' - ' + fmtSize(o.completed) + ' / ' + fmtSize(o.total) + ' (' + pct + '%)';
+        } else {
+          text.textContent = o.status;
+        }
+        if (o.status === 'success') ok = true;
+      }
+    }
+    if (!ok) throw new Error('Download ended before finishing');
+  } catch (e) {
+    if (e.name === 'AbortError') text.textContent = 'Cancelled. Download again to resume.';
+    else { text.className = 'bad'; text.textContent = 'Error: ' + e.message; }
+  } finally {
+    pullCtrl = null;
+    btn.textContent = 'Download';
+    if (ok) { fill.style.width = '100%'; text.textContent = 'Downloaded ' + name; $('#pullName').value = ''; }
+    await refreshModels();
+    renderModelTable();
+  }
+}
+
+$('#modelsBtn').onclick = () => { modelsDlg.showModal(); renderModelTable(); loadLibrary(); };
+$('#dlgClose').onclick = () => modelsDlg.close();
+modelsDlg.addEventListener('click', e => { if (e.target === modelsDlg) modelsDlg.close(); });  // click on the backdrop
+$('#pullBtn').onclick = pullModel;
+$('#pullName').addEventListener('keydown', e => { if (e.key === 'Enter') pullModel(); });
+
+
+/* ---------------- Browse the Ollama library ---------------- */
+let library = null, libLoading = false;
+
+async function loadLibrary() {
+  if (library || libLoading) return;
+  libLoading = true;
+  const sel = $('#libModel');
+  $('#libNote').textContent = '';
+  try {
+    library = (await api('/api/library')).models;
+    library.forEach((m, i) => {
+      const nums = m.sizes.map(parseParams).filter(n => n != null);
+      m._idx = i;
+      m._min = nums.length ? Math.min(...nums) : null;
+      m._max = nums.length ? Math.max(...nums) : null;
+    });
+    const caps = {};
+    library.forEach(m => m.capabilities.forEach(c => caps[c] = (caps[c] || 0) + 1));
+    $('#libCap').innerHTML = '<option value="">Any capability</option>' +
+      Object.keys(caps).sort().map(c => `<option value="${esc(c)}">${esc(c)} (${caps[c]})</option>`).join('');
+    try { const sv = localStorage.getItem('libSort'); if (sv) $('#libSort').value = sv; } catch {}
+    for (const id of ['#libSearch', '#libCap', '#libSize', '#libSort']) $(id).disabled = false;
+    sel.disabled = false;
+    renderLibraryOptions();
+  } catch (e) {
+    sel.innerHTML = '<option value="">Library unavailable - type a model name below</option>';
+    $('#libNote').textContent = e.message;
+  } finally { libLoading = false; }
+}
+
+
+// "1.5b" -> 1.5, "270m" -> 0.27 (billions of parameters); "e2b" -> 2
+function parseParams(t) {
+  const m = /(\d+(?:\.\d+)?)\s*([bmk])?/i.exec(t || '');
+  return m ? parseFloat(m[1]) * ({ b: 1, m: 1e-3, k: 1e-6 }[(m[2] || 'b').toLowerCase()]) : null;
+}
+
+function renderLibraryOptions() {
+  if (!library) return;
+  const q = $('#libSearch').value.trim().toLowerCase();
+  const cap = $('#libCap').value, maxB = parseFloat($('#libSize').value) || 0, sort = $('#libSort').value;
+  const list = library.filter(m =>
+    (!q || m.name.toLowerCase().includes(q) || (m.description || '').toLowerCase().includes(q)) &&
+    (!cap || m.capabilities.includes(cap)) &&
+    (!maxB || (m._min != null && m._min <= maxB)));          // models without size info are hidden when filtering by size
+  if (sort === 'az') list.sort((a, b) => a.name.localeCompare(b.name));
+  else if (sort === 'small') list.sort((a, b) => (a._min ?? 1e9) - (b._min ?? 1e9) || a._idx - b._idx);
+  else if (sort === 'large') list.sort((a, b) => (b._max ?? -1) - (a._max ?? -1) || a._idx - b._idx);
+  // 'popular' keeps the order ollama.com lists them in
+
+  const sel = $('#libModel'), keep = sel.value;
+  const head = list.length === library.length
+    ? 'Browse the Ollama library (' + library.length + ' models)...'
+    : (list.length ? list.length + ' of ' + library.length + ' models match - choose one...' : 'No model matches these filters');
+  sel.innerHTML = '<option value="">' + head + '</option>' + list.map(m => {
+    const extra = [m.sizes.join(', '), m.capabilities.join(', ')].filter(Boolean).join(' · ');
+    return `<option value="${esc(m.name)}" title="${esc(m.description || '')}">${esc(m.name)}${extra ? ' - ' + esc(extra) : ''}</option>`;
+  }).join('');
+  if (list.some(m => m.name === keep)) sel.value = keep;
+  else { $('#libTag').innerHTML = '<option value="">Variant</option>'; $('#libTag').disabled = true; }
+}
+
+for (const id of ['#libSearch', '#libCap', '#libSize', '#libSort']) {
+  $(id).addEventListener(id === '#libSearch' ? 'input' : 'change', () => {
+    if (id === '#libSort') { try { localStorage.setItem('libSort', $('#libSort').value); } catch {} }
+    renderLibraryOptions();
+  });
+}
+
+$('#libModel').addEventListener('change', async e => {
+  const name = e.target.value, tagSel = $('#libTag');
+  tagSel.disabled = true;
+  $('#libNote').textContent = '';
+  if (!name) { tagSel.innerHTML = '<option value="">Variant</option>'; return; }
+  $('#pullName').value = name;                       // downloads the default variant if you stop here
+  tagSel.innerHTML = '<option value="">Loading variants...</option>';
+  try {
+    const { tags, cloud_only } = await api('/api/library/' + encodeURIComponent(name) + '/tags');
+    if ($('#libModel').value !== name) return;       // you picked another model meanwhile
+    if (cloud_only) {
+      tagSel.innerHTML = '<option value="">Cloud-only - nothing to download</option>';
+      $('#pullName').value = '';
+      $('#libNote').textContent = name + ' runs on Ollama\'s servers instead of your computer, so there is no local download.';
+      return;
+    }
+    const installed = new Set(state.models);
+    tagSel.innerHTML = '<option value="">Choose a variant (download size)...</option>' + tags.map(t =>
+      `<option value="${esc(t.tag)}">${esc(t.tag)}${t.size ? ' - ' + esc(t.size) : ''}${installed.has(name + ':' + t.tag) ? '  (installed)' : ''}</option>`
+    ).join('');
+    tagSel.disabled = false;
+  } catch (err) {
+    tagSel.innerHTML = '<option value="">Variants unavailable</option>';
+    $('#libNote').textContent = err.message;
+  }
+});
+
+$('#libTag').addEventListener('change', e => {
+  if (e.target.value) $('#pullName').value = $('#libModel').value + ':' + e.target.value;
 });
 
 (async function init() {
