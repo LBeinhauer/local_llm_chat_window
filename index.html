@@ -61,11 +61,11 @@
   /* ---------- Main ---------- */
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   header {
-    display: flex; align-items: center; gap: 10px; padding: 10px 18px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 18px;
     border-bottom: 1px solid var(--border);
   }
   #title {
-    flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden;
+    flex: 1 1 140px; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis; cursor: text;
   }
   #title:hover { text-decoration: underline dotted; }
@@ -191,6 +191,17 @@
   #libNote { margin: -4px 0 10px; }
   #libNote:empty { display: none; }
 
+  /* ---------- Context + reasoning ---------- */
+  .chk { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .chk[hidden], #ctxSel[hidden] { display: none; }
+  .chk input { accent-color: var(--accent); cursor: pointer; }
+  #ctxSel { max-width: 250px; font-size: 13px; }
+  .think { margin: 0 0 12px; padding-left: 12px; border-left: 3px solid var(--border); color: var(--muted); font-size: 13.5px; }
+  .think summary { cursor: pointer; user-select: none; }
+  .think summary:hover { color: var(--text); }
+  .think-body { white-space: pre-wrap; max-height: 260px; overflow-y: auto; margin-top: 6px; line-height: 1.5; }
+  .think:not([open]) .think-body { display: none; }
+
   @media (max-width: 720px) { #sidebar { display: none; } }
 </style>
 </head>
@@ -208,6 +219,8 @@
 <section id="main">
   <header>
     <div id="title" title="Click to rename">New chat</div>
+    <label class="chk" id="thinkWrap" hidden title="Let the model reason before it answers. Slower, often better; the reasoning counts towards the context size."><input type="checkbox" id="thinkChk" checked> Thinking</label>
+    <select id="ctxSel" hidden title="Context window: how much of the conversation the model can see at once. Bigger needs more memory (estimate shown). Auto picks a size that suits the model."></select>
     <button class="btn" id="sysToggle" title="Set a system prompt for this chat">System prompt</button>
     <select id="modelSel" title="Model for the next message"></select>
   </header>
@@ -322,16 +335,32 @@ function buildMessage(m) {
     el.innerHTML = '<div class="bubble"></div>';
     $('.bubble', el).textContent = m.content;
   } else {
-    el.innerHTML = '<div class="who"></div><div class="body"></div><div class="err"></div>';
+    el.innerHTML = '<div class="who"></div><details class="think" hidden><summary></summary><div class="think-body"></div></details>' +
+      '<div class="body"></div><div class="err"></div>';
     $('.who', el).textContent = m.model || '';
+    $('.think summary', el).addEventListener('click', () => { $('.think', el).dataset.touched = '1'; });  // you decide from now on
     fillAssistant(el, m);
   }
   return el;
 }
+function fmtDur(ms) {
+  const s = Math.max(1, Math.round(ms / 1000));
+  return s < 60 ? s + ' s' : Math.floor(s / 60) + ' min ' + (s % 60) + ' s';
+}
+
 function fillAssistant(el, m) {
-  const body = $('.body', el);
+  const body = $('.body', el), det = $('.think', el);
+  const waiting = state.busy && !m.content && !m.error;        // still waiting for the answer to start
+  if (m.thinking) {
+    det.hidden = false;
+    const tb = $('.think-body', det);
+    tb.textContent = m.thinking;
+    $('summary', det).textContent = waiting ? 'Thinking…' : (m.think_ms != null ? 'Thought for ' + fmtDur(m.think_ms) : 'Reasoning');
+    if (!det.dataset.touched) det.open = waiting;              // open while thinking, fold away once the answer starts
+    if (waiting) tb.scrollTop = tb.scrollHeight;
+  } else { det.hidden = true; }
   if (m.content) { body.classList.remove('dots'); body.innerHTML = renderMd(m.content); addCopyButtons(body); }
-  else if (state.busy && !m.error) { body.innerHTML = ''; body.classList.add('dots'); }
+  else if (waiting && !m.thinking) { body.innerHTML = ''; body.classList.add('dots'); }
   else { body.innerHTML = ''; body.classList.remove('dots'); }
   $('.err', el).textContent = m.error || '';
 }
@@ -367,6 +396,7 @@ function syncModelSelect() {
   if (want && !names.includes(want)) names.push(want);
   sel.innerHTML = names.map(n => `<option value="${esc(n)}">${esc(n)}${state.models.includes(n) ? '' : ' (not installed)'}</option>`).join('');
   if (want) sel.value = want;
+  updateContextControls();
 }
 
 /* ---------------- Sidebar ---------------- */
@@ -427,7 +457,7 @@ function stopStream() { if (state.ctrl) state.ctrl.abort(); }
 
 function newChat() {
   stopStream();
-  state.chat = { id: null, title: 'New chat', model: null, system_prompt: '', messages: [] };
+  state.chat = { id: null, title: 'New chat', model: null, system_prompt: '', num_ctx: null, think: 1, messages: [] };
   renderHeader(); renderMessages(); renderSidebar();
   $('#input').focus();
 }
@@ -479,7 +509,7 @@ async function send() {
   try {
     if (!chat.id) {
       const created = await api('/api/chats', {
-        method: 'POST', body: JSON.stringify({ model, system_prompt: $('#sysPrompt').value }),
+        method: 'POST', body: JSON.stringify({ model, system_prompt: $('#sysPrompt').value, num_ctx: chat.num_ctx, think: chat.think }),
       });
       chat.id = created.id; chat.title = created.title;
     }
@@ -488,7 +518,7 @@ async function send() {
   chat.model = model;
   localStorage.setItem('lastModel', model);
   chat.messages.push({ role: 'user', content: text });
-  const reply = { role: 'assistant', content: '', model };
+  const reply = { role: 'assistant', content: '', thinking: '', model };
   chat.messages.push(reply);
   input.value = ''; autoGrow();
   setBusy(true);
@@ -512,7 +542,7 @@ async function send() {
   try {
     const resp = await fetch(`/api/chats/${chat.id}/messages`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: text, model }), signal: state.ctrl.signal,
+      body: JSON.stringify({ content: text, model, num_ctx: chat.num_ctx, think: chat.think }), signal: state.ctrl.signal,
     });
     if (!resp.ok) {
       let msg = resp.statusText;
@@ -531,7 +561,11 @@ async function send() {
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
         if (!line) continue;
         const obj = JSON.parse(line);
-        if (obj.t) reply.content += obj.t;
+        if (obj.th) { reply.thinking += obj.th; if (reply._t0 == null) reply._t0 = performance.now(); }
+        if (obj.t) {
+          if (reply._t0 != null && reply.think_ms == null) reply.think_ms = performance.now() - reply._t0;
+          reply.content += obj.t;
+        }
         if (obj.error) reply.error = obj.error;
         paint();
       }
@@ -542,7 +576,7 @@ async function send() {
     setBusy(false);
     state.ctrl = null;
     if (state.chat === chat) {
-      if (!reply.content && !reply.error) chat.messages.pop();  // stopped before any output
+      if (!reply.content && !reply.thinking && !reply.error) chat.messages.pop();  // stopped before any output
       renderMessages();
     }
     await loadChats();
@@ -579,6 +613,7 @@ $('#sysPrompt').addEventListener('change', async () => {
 });
 $('#modelSel').addEventListener('change', async () => {
   state.chat.model = $('#modelSel').value;
+  updateContextControls();
   localStorage.setItem('lastModel', state.chat.model);
   if (state.chat.id) await api('/api/chats/' + state.chat.id, { method: 'PATCH', body: JSON.stringify({ model: state.chat.model }) });
   if (!state.chat.messages.length) renderMessages();
@@ -600,6 +635,7 @@ const modelsDlg = $('#modelsDlg');
 async function refreshModels() {
   try {
     state.models = (await api('/api/models')).models;
+    for (const k in modelInfo) delete modelInfo[k];   // models may have changed
     syncModelSelect();
     if (state.models.length) showBanner('');
   } catch (e) { showBanner(e.message); }
@@ -794,6 +830,49 @@ $('#libModel').addEventListener('change', async e => {
 
 $('#libTag').addEventListener('change', e => {
   if (e.target.value) $('#pullName').value = $('#libModel').value + ':' + e.target.value;
+});
+
+
+/* ---------------- Context size + thinking toggle ---------------- */
+const modelInfo = {};
+const fmtCtx = n => n >= 1048576 ? +(n / 1048576).toFixed(1) + 'M' : +(n / 1024).toFixed(1) + 'k';
+const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.round(b / 1e6) + ' MB';
+
+async function loadModelInfo(name) {
+  if (!name) return null;
+  if (modelInfo[name]) return modelInfo[name];
+  try { return (modelInfo[name] = await api('/api/models/info?name=' + encodeURIComponent(name))); }
+  catch { return null; }   // not installed / old Ollama: no context control, Ollama's own default applies
+}
+
+async function updateContextControls() {
+  const name = $('#modelSel').value, sel = $('#ctxSel'), tw = $('#thinkWrap');
+  if (!name || !state.chat) { sel.hidden = tw.hidden = true; return; }
+  const info = await loadModelInfo(name);
+  if ($('#modelSel').value !== name) return;             // you switched models meanwhile
+  tw.hidden = !(info && info.thinking);
+  $('#thinkChk').checked = state.chat.think !== 0 && state.chat.think !== false;
+  if (!info || !info.steps || !info.steps.length) { sel.hidden = true; return; }
+  const kv = info.kv_bytes_per_token;
+  const cost = n => kv ? ' (~' + fmtBytes(kv * n) + ' cache)' : '';
+  sel.innerHTML = '<option value="">Context: auto ' + fmtCtx(info.recommended_context) + cost(info.recommended_context) + '</option>' +
+    info.steps.map(n => `<option value="${n}">${fmtCtx(n)}${cost(n)}${n === info.max_context ? ' (model max)' : ''}</option>`).join('');
+  if (state.chat.num_ctx && !info.steps.includes(state.chat.num_ctx)) {   // saved size doesn't fit this model: back to auto
+    state.chat.num_ctx = null;
+    if (state.chat.id) api('/api/chats/' + state.chat.id, { method: 'PATCH', body: JSON.stringify({ num_ctx: null }) }).catch(() => {});
+  }
+  sel.value = state.chat.num_ctx ? String(state.chat.num_ctx) : '';
+  sel.hidden = false;
+}
+
+$('#ctxSel').addEventListener('change', async () => {
+  const v = $('#ctxSel').value;
+  state.chat.num_ctx = v ? parseInt(v, 10) : null;
+  if (state.chat.id) await api('/api/chats/' + state.chat.id, { method: 'PATCH', body: JSON.stringify({ num_ctx: state.chat.num_ctx }) });
+});
+$('#thinkChk').addEventListener('change', async () => {
+  state.chat.think = $('#thinkChk').checked ? 1 : 0;
+  if (state.chat.id) await api('/api/chats/' + state.chat.id, { method: 'PATCH', body: JSON.stringify({ think: state.chat.think }) });
 });
 
 (async function init() {

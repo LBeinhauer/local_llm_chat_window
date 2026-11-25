@@ -1,3 +1,4 @@
 chats.db
 .venv/*
 .spyproject/*
+anaconda_projects/*
