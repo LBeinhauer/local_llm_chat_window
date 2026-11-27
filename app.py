@@ -12,6 +12,7 @@ import time
 import uuid
 from contextlib import closing, contextmanager
 from pathlib import Path
+from werkzeug.utils import secure_filename
 
 import requests
 from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
@@ -25,6 +26,14 @@ TITLE_MODEL = os.environ.get("TITLE_MODEL", "").strip()  # optional: fixed model
 OLLAMA_SITE = os.environ.get("OLLAMA_SITE", "https://ollama.com").rstrip("/")  # where the downloadable-model list comes from
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # 30 MB per upload
+UPLOAD_DIR = Path(os.environ.get("CHAT_UPLOAD_DIR", BASE_DIR / "uploads"))
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+ALLOWED_EXTENSIONS = {
+    ".pdf", ".txt", ".md", ".py", ".r", ".csv", ".tsv", ".json", ".jsonl",
+    ".yaml", ".yml", ".xml", ".html", ".htm", ".log", ".sql", ".js", ".css",
+    ".docx", ".xlsx", ".pptx"
+}
 
 
 # --------------------------------------------------------------------------
@@ -64,6 +73,18 @@ def init_db():
                 created_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, id);
+            CREATE TABLE IF NOT EXISTS chat_files (
+                id          TEXT PRIMARY KEY,
+                chat_id     TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+                filename    TEXT NOT NULL,
+                stored_name TEXT NOT NULL,
+                extension   TEXT NOT NULL,
+                size_bytes  INTEGER NOT NULL,
+                extracted   TEXT NOT NULL DEFAULT '',
+                include_context INTEGER NOT NULL DEFAULT 1,
+                created_at  REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_files_chat ON chat_files(chat_id, created_at);
             """
         )
         # upgrade databases created by an older version of this app
@@ -77,6 +98,126 @@ def init_db():
         add_column("chats", "think", "INTEGER NOT NULL DEFAULT 1")     # 1 = let thinking models reason
         add_column("messages", "thinking", "TEXT")                     # the model's reasoning, if any
         add_column("messages", "think_ms", "INTEGER")                  # how long it reasoned
+
+
+
+def extract_file_text(path: Path, ext: str) -> str:
+    """Extract readable text from supported file formats; keep binary formats out of model prompts."""
+    if ext == ".pdf":
+        try:
+            import fitz  # PyMuPDF
+            with fitz.open(path) as doc:
+                return "\n\n".join(page.get_text("text") for page in doc)
+        except ImportError:
+            try:
+                from pypdf import PdfReader
+                return "\n\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
+            except ImportError as e:
+                raise ValueError("PDF support needs PyMuPDF (pip install pymupdf) or pypdf") from e
+    if ext == ".docx":
+        try:
+            from docx import Document
+        except ImportError as e:
+            raise ValueError("DOCX support needs python-docx (pip install python-docx)") from e
+        doc = Document(str(path))
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+        for table in doc.tables:
+            parts.extend(" | ".join(cell.text.replace("\n", " ") for cell in row.cells) for row in table.rows)
+        return "\n".join(parts)
+    if ext == ".xlsx":
+        try:
+            from openpyxl import load_workbook
+        except ImportError as e:
+            raise ValueError("XLSX support needs openpyxl (pip install openpyxl)") from e
+        wb = load_workbook(path, read_only=True, data_only=True)
+        lines = []
+        for ws in wb.worksheets:
+            lines.append(f"[Sheet: {ws.title}]")
+            for row in ws.iter_rows(values_only=True):
+                vals = [str(v) if v is not None else "" for v in row]
+                if any(vals):
+                    lines.append(" | ".join(vals))
+        wb.close()
+        return "\n".join(lines)
+    if ext == ".pptx":
+        try:
+            from pptx import Presentation
+        except ImportError as e:
+            raise ValueError("PPTX support needs python-pptx (pip install python-pptx)") from e
+        prs = Presentation(str(path))
+        return "\n\n".join("\n".join(shape.text for shape in slide.shapes if getattr(shape, "has_text_frame", False))
+                           for slide in prs.slides)
+    # Source/code/data/text formats
+    return path.read_text(encoding="utf-8-sig", errors="replace")
+
+
+def split_text_chunks(text: str, size: int = 1200, overlap: int = 180):
+    text = re.sub(r"\n{3,}", "\n\n", (text or "")).strip()
+    if not text:
+        return []
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(len(text), start + size)
+        if end < len(text):
+            # Prefer paragraph or line boundaries without making tiny chunks.
+            cut = max(text.rfind("\n\n", start, end), text.rfind("\n", start, end))
+            if cut > start + size // 2:
+                end = cut
+        chunks.append(text[start:end].strip())
+        if end >= len(text):
+            break
+        start = max(start + 1, end - overlap)
+    return chunks
+
+
+def relevant_file_context(chat_id: str, query: str, max_chars: int = 9000) -> str:
+    """Small lexical retrieval over enabled files; never send every full file by default."""
+    with get_db() as conn:
+        files = conn.execute(
+            "SELECT id, filename, extracted FROM chat_files WHERE chat_id=? AND include_context=1 ORDER BY created_at",
+            (chat_id,),
+        ).fetchall()
+    if not files:
+        return ""
+    terms = {t.lower() for t in re.findall(r"[A-Za-z0-9_./+-]{2,}", query) if len(t) > 1}
+    ranked = []
+    broad_request = bool(re.search(r"\b(summarize|summary|overview|read|explain|explaining|describe|analyze|inspect|walk through|what does|what is in|contents of)\b", query, re.I))
+    for f in files:
+        chunks = split_text_chunks(f["extracted"])
+        name = f["filename"]
+        for idx, chunk in enumerate(chunks):
+            low = chunk.lower()
+            score = sum(min(low.count(term), 6) for term in terms)
+            if name.lower() in query.lower():
+                score += 30
+            # Broad requests should include the first chunks of each selected file.
+            if broad_request and idx < 3:
+                score += 8 - idx
+            if score:
+                ranked.append((score, f["id"], name, idx, chunk))
+    if not ranked and broad_request:
+        for f in files:
+            for idx, chunk in enumerate(split_text_chunks(f["extracted"])[:2]):
+                ranked.append((1, f["id"], f["filename"], idx, chunk))
+    ranked.sort(key=lambda x: (-x[0], x[1], x[3]))
+    selected, seen, used = [], set(), 0
+    for score, fid, name, idx, chunk in ranked:
+        key = (fid, idx)
+        if key in seen:
+            continue
+        piece = f"[File: {name} | excerpt {idx + 1}]\n{chunk}"
+        if used + len(piece) > max_chars:
+            continue
+        selected.append(piece)
+        seen.add(key)
+        used += len(piece)
+        if used >= max_chars:
+            break
+    if not selected:
+        return ""
+    return ("The user has enabled these chat files. Use the excerpts as source material; "
+            "say when the available excerpts do not contain the answer. Do not assume unseen parts.\n\n"
+            + "\n\n---\n\n".join(selected))
 
 
 def like_pattern(q: str) -> str:
@@ -294,6 +435,97 @@ def list_models():
     return jsonify({"models": names})
 
 
+
+# --------------------------------------------------------------------------
+# Chat files
+# --------------------------------------------------------------------------
+@app.get("/api/chats/<chat_id>/files")
+def list_chat_files(chat_id):
+    with get_db() as conn:
+        if not conn.execute("SELECT 1 FROM chats WHERE id=?", (chat_id,)).fetchone():
+            return error("Chat not found", 404)
+        rows = conn.execute(
+            "SELECT id, filename, extension, size_bytes, include_context, created_at, length(extracted) AS text_chars "
+            "FROM chat_files WHERE chat_id=? ORDER BY created_at, filename", (chat_id,)
+        ).fetchall()
+    return jsonify({"files": [dict(r) for r in rows]})
+
+
+@app.post("/api/chats/<chat_id>/files")
+def upload_chat_file(chat_id):
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return error("Choose a file to upload")
+    original = secure_filename(upload.filename)
+    ext = Path(original).suffix.lower()
+    if not original or ext not in ALLOWED_EXTENSIONS:
+        return error("Unsupported file type. Supported: PDF, TXT/MD, PY/R/CSV/TSV, JSON/YAML/XML/HTML, DOCX/XLSX/PPTX and common source files.")
+    with get_db() as conn:
+        if not conn.execute("SELECT 1 FROM chats WHERE id=?", (chat_id,)).fetchone():
+            return error("Chat not found", 404)
+    file_id = uuid.uuid4().hex
+    stored_name = f"{file_id}{ext}"
+    target = UPLOAD_DIR / stored_name
+    try:
+        upload.save(target)
+        size = target.stat().st_size
+        if size > app.config["MAX_CONTENT_LENGTH"]:
+            target.unlink(missing_ok=True)
+            return error("File exceeds the 30 MB upload limit")
+        extracted = extract_file_text(target, ext)
+        if not extracted.strip():
+            extracted = "(No text could be extracted. This may be a scanned PDF or a file containing only images.)"
+        # Keep extracted text manageable in SQLite; chunk retrieval is applied per prompt.
+        extracted = extracted[:2_000_000]
+    except Exception as e:
+        target.unlink(missing_ok=True)
+        return error(str(e) or "Could not read this file")
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO chat_files (id, chat_id, filename, stored_name, extension, size_bytes, extracted, include_context, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (file_id, chat_id, original, stored_name, ext, size, extracted, 1, time.time()),
+        )
+    return jsonify({"id": file_id, "filename": original, "extension": ext, "size_bytes": size,
+                   "include_context": 1, "text_chars": len(extracted)}), 201
+
+
+@app.patch("/api/chats/<chat_id>/files/<file_id>")
+def update_chat_file(chat_id, file_id):
+    data = request.get_json(silent=True) or {}
+    if "include_context" not in data:
+        return error("Nothing to update")
+    enabled = 1 if data["include_context"] else 0
+    with get_db() as conn:
+        cur = conn.execute("UPDATE chat_files SET include_context=? WHERE id=? AND chat_id=?",
+                           (enabled, file_id, chat_id))
+        if not cur.rowcount:
+            return error("File not found", 404)
+    return jsonify({"ok": True, "include_context": enabled})
+
+
+@app.get("/api/chats/<chat_id>/files/<file_id>/text")
+def get_chat_file_text(chat_id, file_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT filename, extracted FROM chat_files WHERE id=? AND chat_id=?",
+                           (file_id, chat_id)).fetchone()
+    if not row:
+        return error("File not found", 404)
+    return jsonify({"filename": row["filename"], "text": row["extracted"]})
+
+
+@app.delete("/api/chats/<chat_id>/files/<file_id>")
+def delete_chat_file(chat_id, file_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT stored_name FROM chat_files WHERE id=? AND chat_id=?",
+                           (file_id, chat_id)).fetchone()
+        if not row:
+            return error("File not found", 404)
+        conn.execute("DELETE FROM chat_files WHERE id=? AND chat_id=?", (file_id, chat_id))
+    (UPLOAD_DIR / row["stored_name"]).unlink(missing_ok=True)
+    return "", 204
+
+
 # --------------------------------------------------------------------------
 # Chats
 # --------------------------------------------------------------------------
@@ -378,7 +610,10 @@ def update_chat(chat_id):
 @app.delete("/api/chats/<chat_id>")
 def delete_chat(chat_id):
     with get_db() as conn:
+        files = conn.execute("SELECT stored_name FROM chat_files WHERE chat_id=?", (chat_id,)).fetchall()
         conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+    for row in files:
+        (UPLOAD_DIR / row["stored_name"]).unlink(missing_ok=True)
     return "", 204
 
 
@@ -429,6 +664,10 @@ def send_message(chat_id):
     if system_prompt.strip():
         messages.append({"role": "system", "content": system_prompt})
     messages += [{"role": m["role"], "content": m["content"]} for m in history]
+    # Inject retrieved excerpts only into this request. Stored chat history remains clean.
+    file_context = relevant_file_context(chat_id, content)
+    if file_context and messages and messages[-1]["role"] == "user":
+        messages[-1]["content"] += "\n\n[Relevant attached-file context]\n" + file_context
 
     info = safe_model_info(model)
     ctx = resolve_ctx(info, num_ctx)

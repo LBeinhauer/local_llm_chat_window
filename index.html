@@ -202,6 +202,23 @@
   .think-body { white-space: pre-wrap; max-height: 260px; overflow-y: auto; margin-top: 6px; line-height: 1.5; }
   .think:not([open]) .think-body { display: none; }
 
+  /* ---------- Chat files ---------- */
+  #filePanel { max-width: 760px; margin: 0 auto 8px; width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; transition: border-color .12s, background .12s; }
+  #filePanel.drag-over { border: 2px dashed var(--accent); padding: 7px 9px; background: color-mix(in srgb, var(--accent) 8%, var(--bg)); }
+  #dropNotice { display: none; text-align: center; color: var(--accent); font-weight: 600; padding: 10px 6px; border-radius: 8px; }
+  #filePanel.drag-over #dropNotice { display: block; }
+  #fileTop { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #fileTop strong { font-size: 13px; }
+  #fileInput { display: none; }
+  #fileList { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  .file-chip { display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 8px; padding: 4px 7px; max-width: 100%; font-size: 12px; }
+  .file-chip .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 210px; }
+  .file-chip button { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 0 2px; }
+  .file-chip button:hover { color: var(--text); }
+  .file-chip input { accent-color: var(--accent); }
+  #fileHint { font-size: 11px; color: var(--muted); margin-top: 5px; }
+  #filePreview { width: min(900px, 95vw); }
+  #filePreview pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 70vh; overflow: auto; padding: 12px; background: var(--code); border-radius: 8px; font-size: 12px; }
   @media (max-width: 720px) { #sidebar { display: none; } }
 </style>
 </head>
@@ -231,6 +248,12 @@
   <div id="banner"></div>
   <div id="messages"><div class="wrap" id="msgWrap"></div></div>
   <div id="composer">
+    <div id="filePanel">
+      <div id="fileTop"><strong>Chat files</strong><div><input id="fileInput" type="file" multiple><button class="btn sm" id="addFiles">Add files</button></div></div>
+      <div id="dropNotice" aria-live="polite">Drop files here to attach them to this chat</div>
+      <div id="fileList"><span class="hint">Upload documents or source files to discuss them in this chat.</span></div>
+      <div id="fileHint">Drop files anywhere in this panel, or use Add files. Enabled files are searched for relevant excerpts when you send a message.</div>
+    </div>
     <div class="box">
       <textarea id="input" rows="1" placeholder="Message your local model…"></textarea>
       <button id="send">Send</button>
@@ -238,6 +261,13 @@
     <div class="hint">Enter to send · Shift+Enter for a new line</div>
   </div>
 </section>
+
+<dialog id="filePreview">
+  <div class="dlg-in">
+    <div class="dlg-head"><strong id="previewTitle">File preview</strong><button class="btn sm" id="previewClose">Close</button></div>
+    <pre id="previewText"></pre>
+  </div>
+</dialog>
 
 <dialog id="modelsDlg">
   <div class="dlg-in">
@@ -285,6 +315,7 @@ const state = {
   chats: [],          // sidebar list
   chat: null,         // {id|null, title, model, system_prompt, messages[]}
   models: [],
+  files: [],
   busy: false,
   ctrl: null,
   query: '',
@@ -452,6 +483,99 @@ async function loadChats() {
   } catch (e) { showBanner(e.message); }
 }
 
+
+/* ---------------- Chat files ---------------- */
+async function ensureChatForFiles() {
+  const chat = state.chat;
+  if (chat.id) return chat;
+  const model = $('#modelSel').value || state.models[0] || null;
+  const created = await api('/api/chats', {
+    method: 'POST',
+    body: JSON.stringify({ model, system_prompt: $('#sysPrompt').value, num_ctx: chat.num_ctx, think: chat.think }),
+  });
+  chat.id = created.id;
+  chat.title = created.title;
+  renderHeader(); renderSidebar();
+  return chat;
+}
+
+function formatFileSize(n) {
+  return n < 1024 * 1024 ? Math.max(1, Math.round(n / 1024)) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+}
+
+function renderChatFiles() {
+  const list = $('#fileList');
+  list.innerHTML = '';
+  if (!state.files.length) {
+    list.innerHTML = '<span class="hint">No files attached to this chat yet.</span>';
+    return;
+  }
+  for (const f of state.files) {
+    const chip = document.createElement('div');
+    chip.className = 'file-chip';
+    chip.innerHTML = `<input type="checkbox" ${f.include_context ? 'checked' : ''} title="Include this file in model context">
+      <span class="fname" title="${esc(f.filename)}">${esc(f.filename)}</span>
+      <span>${formatFileSize(f.size_bytes)}</span>
+      <button type="button" data-action="preview" title="Preview extracted text">View</button>
+      <button type="button" data-action="delete" title="Remove file">×</button>`;
+    chip.querySelector('input').onchange = async e => {
+      try {
+        await api(`/api/chats/${state.chat.id}/files/${f.id}`, {
+          method: 'PATCH', body: JSON.stringify({ include_context: e.target.checked }),
+        });
+        f.include_context = e.target.checked ? 1 : 0;
+      } catch (err) { showBanner(err.message); e.target.checked = !!f.include_context; }
+    };
+    chip.querySelector('[data-action="preview"]').onclick = () => previewChatFile(f);
+    chip.querySelector('[data-action="delete"]').onclick = async () => {
+      if (!confirm(`Remove "${f.filename}" from this chat?`)) return;
+      try {
+        await api(`/api/chats/${state.chat.id}/files/${f.id}`, { method: 'DELETE' });
+        state.files = state.files.filter(x => x.id !== f.id);
+        renderChatFiles();
+      } catch (err) { showBanner(err.message); }
+    };
+    list.appendChild(chip);
+  }
+}
+
+async function refreshChatFiles() {
+  if (!state.chat.id) { state.files = []; renderChatFiles(); return; }
+  try {
+    state.files = (await api(`/api/chats/${state.chat.id}/files`)).files;
+    renderChatFiles();
+  } catch (e) { showBanner(e.message); }
+}
+
+async function uploadSelectedFiles(fileList) {
+  if (!fileList || !fileList.length) return;
+  try {
+    const chat = await ensureChatForFiles();
+    for (const file of fileList) {
+      const form = new FormData();
+      form.append('file', file);
+      const response = await fetch(`/api/chats/${chat.id}/files`, { method: 'POST', body: form });
+      if (!response.ok) {
+        let message = response.statusText;
+        try { message = (await response.json()).error || message; } catch {}
+        throw new Error(`${file.name}: ${message}`);
+      }
+    }
+    await refreshChatFiles();
+    showBanner('');
+  } catch (e) { showBanner(e.message); }
+  $('#fileInput').value = '';
+}
+
+async function previewChatFile(file) {
+  try {
+    const data = await api(`/api/chats/${state.chat.id}/files/${file.id}/text`);
+    $('#previewTitle').textContent = data.filename + ' · extracted text';
+    $('#previewText').textContent = data.text || '(No extracted text)';
+    $('#filePreview').showModal();
+  } catch (e) { showBanner(e.message); }
+}
+
 /* ---------------- Chat actions ---------------- */
 function stopStream() { if (state.ctrl) state.ctrl.abort(); }
 
@@ -459,6 +583,7 @@ function newChat() {
   stopStream();
   state.chat = { id: null, title: 'New chat', model: null, system_prompt: '', num_ctx: null, think: 1, messages: [] };
   renderHeader(); renderMessages(); renderSidebar();
+  state.files = []; renderChatFiles();
   $('#input').focus();
 }
 
@@ -468,6 +593,7 @@ async function openChat(id) {
   try {
     state.chat = await api('/api/chats/' + id);
     renderHeader(); renderMessages(); renderSidebar();
+    await refreshChatFiles();
   } catch (e) { showBanner(e.message); }
 }
 
@@ -599,6 +725,38 @@ function autoGrow() {
   t.style.height = Math.min(t.scrollHeight, 220) + 'px';
 }
 
+$('#addFiles').onclick = () => $('#fileInput').click();
+$('#fileInput').addEventListener('change', e => uploadSelectedFiles(e.target.files));
+
+// Drag-and-drop upload: accept files dropped anywhere in the Chat files panel.
+const filePanel = $('#filePanel');
+let fileDragDepth = 0;
+filePanel.addEventListener('dragenter', e => {
+  if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+  e.preventDefault();
+  fileDragDepth++;
+  filePanel.classList.add('drag-over');
+});
+filePanel.addEventListener('dragover', e => {
+  if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }
+});
+filePanel.addEventListener('dragleave', e => {
+  e.preventDefault();
+  fileDragDepth = Math.max(0, fileDragDepth - 1);
+  if (!fileDragDepth) filePanel.classList.remove('drag-over');
+});
+filePanel.addEventListener('drop', e => {
+  e.preventDefault();
+  fileDragDepth = 0;
+  filePanel.classList.remove('drag-over');
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+    uploadSelectedFiles(e.dataTransfer.files);
+  }
+});
+$('#previewClose').onclick = () => $('#filePreview').close();
 $('#newChat').onclick = newChat;
 $('#send').onclick = send;
 $('#title').onclick = renameChat;
